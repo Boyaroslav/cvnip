@@ -1,0 +1,5 @@
+a.out
+CMakeFiles
+CMakeCache.txt
+frozen_east_text_detection.pb
+cmake_install.cmake
