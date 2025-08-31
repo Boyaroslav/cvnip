@@ -1,0 +1,16 @@
+[Unit]
+Description=Cvnip Clipboard
+After=graphical-session.target
+
+
+[Service]
+Type=simple
+Environment=DISPLAY=@DISPLAY@
+ExecStartPre=/bin/sleep 3
+Environment=XAUTHORITY=@XAUTHORITY@
+PermissionsStartOnly=true
+ExecStart=%h/.local/share/cvnip/cvdaemon
+Restart=always
+
+[Install]
+WantedBy=default.target

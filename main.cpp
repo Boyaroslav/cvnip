@@ -25,17 +25,21 @@
 #include <X11/extensions/Xcomposite.h>
 #include <X11/Xft/Xft.h>
 
+#include "translate.hpp"
+
 using namespace cv;
 using namespace std;
+
+#define PATH_TO_TESSDATA NULL // set "path/to/your/tessdata" or use NULL for autodetection
+#define FONTNAME "monospace"   
+#define DEFAULT_LANGUAGE "eng+rus"
 
 XRenderColor xrcolor = {0xffff, 0xffff, 0xffff, 0xffff};     // color of text
 XRenderColor xrcolor_stroke = {0, 0, 0, 0xffff};     // color of stroke
 XRenderColor darkBG = {0, 0, 0, 0xffff};
-#define FONTNAME "monospace"   
-#define DEFAULT_LANGUAGE "eng+rus"
-const char* bufsocket = "/tmp/bufcvnip.sock";
 
 #define BUFFERSIZE 8192 // block size while sending to daemon
+const char* bufsocket = "/tmp/bufcvnip.sock";
 
 static int wiwidth;
 static int wiheight;
@@ -414,13 +418,11 @@ int main() {
                         rh = 0 - rh;
                     }
 
-                    std::cout<<"hui"<<rx<<' '<<ry<<"\n";
                     Mat img = getmeth(XGetImage(disp,root, rx,ry , rw,rh,AllPlanes, ZPixmap));
-                    std::cout<<"hui2\n";
                     if (img.empty()) return -1;
 
                     tesseract::TessBaseAPI ocr;
-                    if (ocr.Init(NULL, DEFAULT_LANGUAGE)) { 
+                    if (ocr.Init(PATH_TO_TESSDATA, DEFAULT_LANGUAGE)) { 
                         cerr << "Could not initialize tesseract.\n";
                         return -1;
                     }

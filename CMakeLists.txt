@@ -3,6 +3,10 @@ project(OpenCVTest)
 set(CMAKE_CXX_STANDARD 17)
 set(OpenGL_GL_PREFERENCE GLVND)
 
+message("Please set DEFAULT_LANGUAGE macros in main.cpp to language you want to select")
+message("see https://tesseract-ocr.github.io/tessdoc/Installation.html if you don't have tesseract")
+message("and https://tesseract-ocr.github.io/tessdoc/Home.html as well")
+
 find_package(OpenCV REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(X11 REQUIRED)
