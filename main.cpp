@@ -3,18 +3,18 @@
 #include <tesseract/baseapi.h>
 #include <leptonica/allheaders.h>
 #include <opencv2/opencv.hpp>
-#include <iostream>
 #include<vector>
 
 #include <X11/Xutil.h>
 #include<stdlib.h>
 #include<X11/Xlib.h>
 #include<X11/cursorfont.h>
-#include<unistd.h>
-#include<string>
 
-#include <sys/socket.h>
 #include <sys/un.h>
+
+#include <getopt.h>
+
+#include <fontconfig/fontconfig.h> 
 
 #include <GL/gl.h>
 #include <GL/glx.h>
@@ -25,39 +25,88 @@
 #include <X11/extensions/Xcomposite.h>
 #include <X11/Xft/Xft.h>
 
+#include "translate.hpp"
+#include "align.hpp"
+
 using namespace cv;
 using namespace std;
+
+#define PATH_TO_TESSDATA NULL // set "path/to/your/tessdata" or use NULL for autodetection
+#define FONTNAME "monospace"   
+const char* DEFAULT_LANGUAGE = "eng+rus";
+const char* TRANSLATION_LANGUAGE = "ru";
 
 XRenderColor xrcolor = {0xffff, 0xffff, 0xffff, 0xffff};     // color of text
 XRenderColor xrcolor_stroke = {0, 0, 0, 0xffff};     // color of stroke
 XRenderColor darkBG = {0, 0, 0, 0xffff};
-#define FONTNAME "monospace"   
-#define DEFAULT_LANGUAGE "eng+rus"
-const char* bufsocket = "/tmp/bufcvnip.sock";
 
 #define BUFFERSIZE 8192 // block size while sending to daemon
+const char* bufsocket = "/tmp/bufcvnip.sock";
 
 static int wiwidth;
 static int wiheight;
 
+int TRANSLATED = 0;
+
+
 class Word{
-    private:
-        int x2, y2;
     public:
-    int x, y, w, h;
+        int x2, y2;
+    
+    string translation;
+    int x1, y1, w, h;
+    string buff;
     string text;
     Word(string text_, int x_, int y_, int x2_, int y2_){
-        x2 = x2_; y2 = y2_;
-        x = x_; y = y_;
+        x1 = std::min(x_, x2_);
+        x2 = std::max(x_, x2_);
+        y1 = std::min(y_, y2_);
+        y2 = std::max(y_, y2_);
         w = x_ - x2_; h = y_ - y2_;
         text = text_;
 
     }
+    void add_translation(string n){
+        if (translation.size() > 0) translation += " ";
+        translation += n;
+    }
+    void set_translation(){
+        if (translation.size()==0){translation=" ";}
+        buff = text;
+        text = translation;
+    }
+
+    void SetText(string nt){text=nt;}
 
 
 };
 
-vector<Word>words;
+class Block{
+    public:
+    int x, y, x2, y2;
+    vector<Word>words;
+    Word trashword;
+
+    Block(int xv, int yv, int x22, int y22, vector<Word>&w):x(xv),y(yv),x2(x22),y2(y22), trashword("err", -100, -100, 0, 0) {
+        words.swap(w);
+    }
+    void Translate(vector<Word>newwords){
+        return;
+    }
+    Word& operator[](ssize_t i){return words[i];}
+
+    Word& FindByName(string name){
+        for(int i=0; i<words.size();i++){
+            if (name == words[i].text){
+                return words[i];
+            }
+        }
+        return trashword;
+    }
+
+};
+
+vector<Block>blocks;
 
 class Button{
     public:
@@ -99,9 +148,13 @@ class Button{
 int RESULT_SIZE = -1;
 
 XftFont* loadFontFitting(Display* disp, int screen, const char* family,
-                         int maxSize, int targetWidth,
+                         int maxSize, int targetWidth, int targetHeight,
                          const char* text) {
     XGlyphInfo extents;
+    XftFont* chosen = nullptr;
+    int chosenSize = 0;
+
+    // Ищем подходящий по ширине
     for (int size = maxSize; size >= 6; size--) {
         std::string fontName = std::string(family) + "-" + std::to_string(size);
         XftFont* font = XftFontOpenName(disp, screen, fontName.c_str());
@@ -110,16 +163,45 @@ XftFont* loadFontFitting(Display* disp, int screen, const char* family,
         XftTextExtentsUtf8(disp, font, (FcChar8*)text, strlen(text), &extents);
 
         if (extents.width <= targetWidth) {
-            RESULT_SIZE = size;
-            return font; // нашли подходящий
+            chosen = font;
+            chosenSize = size;
+            break;
         }
-
         XftFontClose(disp, font);
     }
-    RESULT_SIZE = 6;
-    std::string fontName = std::string(family) + "-" + std::to_string(RESULT_SIZE);
-    XftFont* font = XftFontOpenName(disp, screen, fontName.c_str());
-    return font;
+
+    // Если ничего не нашли — fallback на минимальный
+    if (!chosen) {
+        chosenSize = 6;
+        std::string fontName = std::string(family) + "-" + std::to_string(chosenSize);
+        chosen = XftFontOpenName(disp, screen, fontName.c_str());
+        if (!chosen) return nullptr;
+        XftTextExtentsUtf8(disp, chosen, (FcChar8*)text, strlen(text), &extents);
+    }
+
+    // Проверяем высоту
+    int naturalHeight = chosen->ascent + chosen->descent;
+    if (naturalHeight > targetHeight) {
+        double scaleY = (double)targetHeight / (double)naturalHeight;
+
+        FcMatrix m;
+        FcMatrixInit(&m);
+        FcMatrixScale(&m, 1.0, scaleY); // сжать по Y
+
+        XftPattern* pat = XftPatternCreate();
+        XftPatternAddString(pat, XFT_FAMILY, family);
+        XftPatternAddDouble(pat, XFT_SIZE, (double)chosenSize);
+        XftPatternAddMatrix(pat, XFT_MATRIX, &m);
+
+        XftFont* scaled = XftFontOpenPattern(disp, pat);
+        if (scaled) {
+            XftFontClose(disp, chosen);
+            chosen = scaled;
+        }
+    }
+
+    RESULT_SIZE = chosenSize;
+    return chosen;
 }
 
 
@@ -133,16 +215,20 @@ Mat getmeth(XImage* s){
 void Copy(Display* disp, Window window){
     string text;
 
-    if (words.size()){
-    for(int i=0; i<words.size()-1;i++){
-        text += words[i].text;
+    if (blocks.size()){
+    for(int i=0; i<blocks.size(); i++){
+        std::cout<<i<<"\n";
+        if (i>0){if (blocks[i][0].y1 - blocks[i-1][blocks[i-1].words.size()-1].y1 > 10){text += "\n";} 
+        else{text += " ";}}
+    for(int j=0; j<blocks[i].words.size()-1;j++){
+        text += blocks[i].words[j].text;
         // if next text if 10px under previous one, the \n is inserted to the beginning of the new line
-        if (words[i+1].y - words[i].y > 10) text += "\n";
+        if (blocks[i].words[j+1].y1 - blocks[i].words[j].y1 > 10) text += "\n";
         else text += " ";
     }
-    text += words[words.size()-1].text;
+    text += blocks[i][blocks[i].words.size()-1].text;
     
-    }
+    }}
     std::cout<<"sending to "<<bufsocket<<"\n";
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
 
@@ -172,7 +258,82 @@ void Exit(Display* disp, Window window){
     XSendEvent(disp, window, False, NoEventMask, &event);
 }
 
-int main() {
+void Translate_start(Display* disp, Window window){
+
+    if (blocks.empty()) return;
+
+    for(size_t i=0; i<blocks.size(); i++){
+
+        if (blocks[i].words.empty()) continue;
+
+        string text;
+        for(size_t j=0; j<blocks[i].words.size(); ++j){
+            text += blocks[i].words[j].text;
+
+            //blocks[i].words[j].translation = "";
+
+            if (j+1 < blocks[i].words.size()){
+                if (blocks[i].words[j+1].y1 - blocks[i].words[j].y1 > 10)
+                    text += " ";
+                else
+                    text += " ";
+            }
+        }
+
+        string res = Translate(text, "auto", TRANSLATION_LANGUAGE);
+
+        fast_align model;
+        model.loadmodel();
+
+        vector<string> src = Split(text, ' ');
+        vector<string> tgt = Split(res, ' ');
+
+        if (!src.empty() && !tgt.empty()){
+            model.train_pair(src, tgt, 50);
+            model.savemodel();
+
+            auto alig = model.align(src, tgt);
+
+            for (auto [src_idx, tgt_idx] : alig){
+                if (src_idx >= src.size() || tgt_idx >= tgt.size()) continue;
+
+                string src_word = src[src_idx];
+                string tgt_word = tgt[tgt_idx];
+
+                Word& w = blocks[i].FindByName(src_word);
+
+                if (w.text != "err")
+                std::cout<<src_word<<" "<<tgt_word<<"\n";
+                    w.add_translation(tgt_word);
+            }
+        }
+
+        for (auto& w : blocks[i].words){
+            w.set_translation();
+        }
+    }
+    TRANSLATED = 1;
+}
+
+int main(int argc, char** argv) {
+
+    int opt;
+    while ((opt = getopt(argc, argv, "d:t:h")) != -1){
+        switch(opt){
+            case 'd':
+                DEFAULT_LANGUAGE = optarg;
+                break;
+            case 'h':
+                std::cout<<"cvnip librejokes.ru. -d <text> for setting default language\n Libre Translator requires en and ru, whereas OCR requires\n eng and rus (or eng+rus)\n";
+                return 0;
+            case 't':
+                TRANSLATION_LANGUAGE = optarg;
+                break;
+            default:
+                std::cout<<"nu such option\n";
+                return 0;
+        }
+    }
 
   static int VisData[] = {
         GLX_RENDER_TYPE, GLX_RGBA_BIT,
@@ -307,7 +468,7 @@ int main() {
     vector<Button> btns;
     btns.push_back(
         Button(
-            "translate", "translate", 0, 0, 400, 100, Copy
+            "translate", "translate", 0, 0, 400, 100, Translate_start
         )
     );
     btns.push_back(
@@ -348,7 +509,7 @@ int main() {
         }
         //~ while (!done && XPending(disp)) {
         //~ XNextEvent(disp, &ev);
-        if (!XPending(disp)) { usleep(1000); continue; } // fixes the 100% CPU hog issue in original code
+        else if (!XPending(disp)) { usleep(1000); continue; } // fixes the 100% CPU hog issue in original code
         if ( (XNextEvent(disp, &ev) >= 0) ) {
         switch (ev.type) {
             case KeyPress:
@@ -414,34 +575,43 @@ int main() {
                         rh = 0 - rh;
                     }
 
-                    std::cout<<"hui"<<rx<<' '<<ry<<"\n";
                     Mat img = getmeth(XGetImage(disp,root, rx,ry , rw,rh,AllPlanes, ZPixmap));
-                    std::cout<<"hui2\n";
                     if (img.empty()) return -1;
 
                     tesseract::TessBaseAPI ocr;
-                    if (ocr.Init(NULL, DEFAULT_LANGUAGE)) { 
+                    if (ocr.Init(PATH_TO_TESSDATA, DEFAULT_LANGUAGE)) { 
                         cerr << "Could not initialize tesseract.\n";
                         return -1;
                     }
 
                 ocr.SetImage(img.data, img.cols, img.rows, img.channels(), img.step);
+                //ocr.SetPageSegMode(tesseract::PSM_AUTO);
                 ocr.Recognize(0);
 
                 tesseract::ResultIterator* ri = ocr.GetIterator();
-                tesseract::PageIteratorLevel level = tesseract::RIL_WORD;
+                tesseract::PageIteratorLevel block_level = tesseract::RIL_BLOCK;
+                tesseract::PageIteratorLevel word_level = tesseract::RIL_WORD;
 
                 if (ri != nullptr) {
+                    vector<Word>words;
                     do {
-                        string word = string(ri->GetUTF8Text(level));
-                        float conf = ri->Confidence(level);
+                        
+                        float conf = ri->Confidence(block_level);
 
-                        int x1, y1, x2, y2;
-                        ri->BoundingBox(level, &x1, &y1, &x2, &y2);
+                        int bx1, by1, bx2, by2;
+                        ri->BoundingBox(block_level, &bx1, &by1, &bx2, &by2);
+                        words.clear();
+                
+                        tesseract::ResultIterator* word_i = ri;
+                        do{
+                        string word = string(word_i->GetUTF8Text(word_level));
 
                         if (word.size()) {
-                            words.push_back(Word(word, x1, y1, x2, y2));
-                            font = loadFontFitting(disp, DefaultScreen(disp), FONTNAME, 30, x2-x1, word.c_str());
+                            int x1, y1, x2, y2;
+                            word_i->BoundingBox(word_level, &x1, &y1, &x2, &y2);
+
+                            words.push_back(Word(word, rx+  x1, ry + y1, rx + x2, ry + y2));
+                            font = loadFontFitting(disp, DefaultScreen(disp), FONTNAME, 30, x2-x1, y2-y1, word.c_str());
                             for (int dx = -1; dx <= 1; dx++) {
                                 for (int dy = -1; dy <= 1; dy++) {
                                     if (dx == 0 && dy == 0) continue; 
@@ -453,8 +623,10 @@ int main() {
                             }
                             XftDrawStringUtf8(draw, &color, font, rx + x1, ry + y1 + RESULT_SIZE,
                               (FcChar8*)word.c_str(), word.size());
-                        }
-                    } while (ri->Next(level));
+                        }} while(word_i -> Next(word_level) && (word_i ->IsAtBeginningOf(tesseract::RIL_BLOCK)==false));
+                        blocks.push_back(Block(bx1, by1, bx2, by2, words));
+                    } while (ri->Next(block_level));
+
                 }
                 btns[0].SetPos(rx, ry + rh + 10);
                 btns[1].SetPos(rx + 300, ry + rh + 10);
@@ -466,6 +638,7 @@ int main() {
                 for (auto &b : btns) {
                 if (mx >= b.x && mx <= b.x+b.w && my >= b.y && my <= b.y+b.h) {
                 b.Call(disp, window);
+                
                 }
             }
             }
@@ -478,6 +651,27 @@ int main() {
         if (ready){
             for (auto &b : btns) {
                 b.Draw(disp, window, gc, DefaultScreen(disp), draw);
+            }
+            if(TRANSLATED){
+                TRANSLATED=0;
+                for(Block &b : blocks){
+                    for(Word &w : b.words){
+                        if (w.text == " ") XftDrawRect(draw, &color_darkBG, w.x1, w.y1, w.x2 - w.x1, w.y2-w.y1);
+                        font = loadFontFitting(disp, DefaultScreen(disp), FONTNAME, 30, w.x2-w.x1, w.y2 - w.y1, w.text.c_str());
+                        for (int dx = -1; dx <= 1; dx++) {
+                            for (int dy = -1; dy <= 1; dy++) {
+                                if (dx == 0 && dy == 0) continue; 
+                                    XftDrawRect(draw, &color_darkBG, w.x1, w.y1, w.x2 - w.x1, w.y2-w.y1);
+                                    XftDrawStringUtf8(draw, &color_stroke, font,
+                                                    w.x1 + dx, w.y1 + dy + RESULT_SIZE,
+                                                    (FcChar8*)w.text.c_str(), w.text.size());
+                                }
+                            }
+                            XftDrawStringUtf8(draw, &color, font, w.x1, w.y1 + RESULT_SIZE,
+                              (FcChar8*)w.text.c_str(), w.text.size());
+
+                    }
+                }
             }
         }
 
